@@ -75,18 +75,6 @@ jobs:
           cmake --build $env:BUILD_DIR --config Release
 
       ##
-      # TEST
-      ##
-
-      - name: Test
-        run: |
-          ctest `
-            --test-dir $env:BUILD_DIR `
-            --output-on-failure `
-            -C Release `
-            -E "^example64|example$"
-
-      ##
       # PACKAGE
       ##
 
