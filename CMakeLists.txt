@@ -209,21 +209,11 @@ set(Launcher_FORCE_BUNDLED_LIBS OFF CACHE BOOL "Prevent using system libraries, 
 set(Launcher_QT_VERSION_MAJOR "6" CACHE STRING "Major Qt version to build against")
 
 # API Keys
-# NOTE: These API keys are here for convenience. If you rebrand this software or intend to break the terms of service
-# of these platforms, please change these API keys beforehand.
-# Be aware that if you were to use these API keys for malicious purposes they might get revoked, which might cause
-# breakage to thousands of users.
-# If you don't plan to use these features of this software, you can just remove these values.
+# we don’t need these anyway eh
 
-# By using this key in your builds you accept the terms of use laid down in
-# https://docs.microsoft.com/en-us/legal/microsoft-identity-platform/terms-of-use
-set(Launcher_MSA_CLIENT_ID "c36a9fb6-4f2a-41ff-90bd-ae7cc92031eb" CACHE STRING "Client ID you can get from Microsoft Identity Platform when you register an application")
+set(Launcher_MSA_CLIENT_ID "" CACHE STRING "Microsoft Authentication client ID")
 
-# By using this key in your builds you accept the terms and conditions laid down in
-# https://support.curseforge.com/en/support/solutions/articles/9000207405-curse-forge-3rd-party-api-terms-and-conditions
-# NOTE: CurseForge requires you to change this if you make any kind of derivative work.
-# This key was issued specifically for Prism Launcher
-set(Launcher_CURSEFORGE_API_KEY "$2a$10$wuAJuNZuted3NORVmpgUC.m8sI.pv1tOPKZyBgLFGjxFp/br0lZCC" CACHE STRING "API key for the CurseForge platform")
+set(Launcher_CURSEFORGE_API_KEY "" CACHE STRING "CurseForge API key")
 
 
 #### Check the current Git commit and branch
