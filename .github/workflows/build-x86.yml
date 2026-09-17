@@ -1,0 +1,91 @@
+name: Build PrismLauncher x86
+
+on:
+  push:
+    branches:
+      - "7.2"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Windows x86
+    runs-on: windows-2022
+
+    env:
+      BUILD_TYPE: Release
+      BUILD_DIR: build
+      INSTALL_DIR: install
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: true
+
+      - name: Install Qt 5.15.2 x86
+        uses: jurplel/install-qt-action@v4
+        with:
+          version: "5.15.2"
+          host: windows
+          target: desktop
+          arch: win32_msvc2019
+          tools: tools_openssl_x86
+          modules: ""
+          cache: true
+
+      - name: Setup MSVC x86
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          vsversion: "2022"
+          arch: x86
+
+      - name: Install CMake and Ninja
+        run: |
+          choco install cmake ninja -y --no-progress
+
+      - name: Configure CMake
+        shell: powershell
+        run: |
+          cmake `
+            -S . `
+            -B $env:BUILD_DIR `
+            -G Ninja `
+            -DCMAKE_BUILD_TYPE=$env:BUILD_TYPE `
+            -DCMAKE_INSTALL_PREFIX=$env:INSTALL_DIR `
+            -DLauncher_BUILD_PLATFORM=official `
+            -DLauncher_QT_VERSION_MAJOR=5 `
+            -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreadedDLL `
+            -DLauncher_FORCE_BUNDLED_LIBS=ON
+
+      - name: Build
+        run: |
+          cmake --build $env:BUILD_DIR --config $env:BUILD_TYPE
+
+      - name: Install
+        run: |
+          cmake --install $env:BUILD_DIR --config $env:BUILD_TYPE
+
+      - name: Prepare portable package
+        shell: powershell
+        run: |
+          New-Item -ItemType Directory -Force -Path install-portable | Out-Null
+          Copy-Item -Recurse -Force "install\*" "install-portable\"
+
+      - name: Create ZIP
+        shell: powershell
+        run: |
+          Compress-Archive `
+            -Path "install-portable\*" `
+            -DestinationPath "PrismLauncher-x86.zip" `
+            -Force
+
+      - name: Upload x86 build
+        uses: actions/upload-artifact@v4
+        with:
+          name: PrismLauncher-x86
+          path: PrismLauncher-x86.zip
+          if-no-files-found: error
+          retention-days: 30
