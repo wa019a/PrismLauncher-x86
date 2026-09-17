@@ -53,6 +53,7 @@
 #include <QList>
 #include <QHostAddress>
 #include <QPushButton>
+#include <QMessageBox>
 
 #include "BuildConfig.h"
 #include "JavaCommon.h"
