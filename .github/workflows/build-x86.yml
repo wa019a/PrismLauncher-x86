@@ -15,11 +15,15 @@ jobs:
     runs-on: windows-2022
 
     env:
-      BUILD_TYPE: Release
-      BUILD_DIR: build
-      INSTALL_DIR: install
+      INSTALL_DIR: "install"
+      INSTALL_PORTABLE_DIR: "install-portable"
+      BUILD_DIR: "build"
 
     steps:
+      ##
+      # PREPARE
+      ##
+
       - name: Checkout
         uses: actions/checkout@v4
         with:
@@ -28,23 +32,24 @@ jobs:
       - name: Install Qt 5.15.2 x86
         uses: jurplel/install-qt-action@v4
         with:
+          aqtversion: "==3.3.*"
+          py7zrversion: ">=0.20.2"
           version: "5.15.2"
           host: windows
           target: desktop
           arch: win32_msvc2019
-          tools: tools_openssl_x86
           modules: ""
           cache: true
 
-      - name: Setup MSVC x86
+      - name: Install MSVC
         uses: ilammy/msvc-dev-cmd@v1
         with:
-          vsversion: "2022"
-          arch: x86
+          vsversion: 2022
+          arch: amd64_x86
 
-      - name: Install CMake and Ninja
-        run: |
-          choco install cmake ninja -y --no-progress
+      ##
+      # CONFIGURE
+      ##
 
       - name: Configure CMake
         shell: powershell
@@ -52,40 +57,97 @@ jobs:
           cmake `
             -S . `
             -B $env:BUILD_DIR `
-            -G Ninja `
-            -DCMAKE_BUILD_TYPE=$env:BUILD_TYPE `
             -DCMAKE_INSTALL_PREFIX=$env:INSTALL_DIR `
+            -DCMAKE_BUILD_TYPE=Release `
+            -DENABLE_LTO=ON `
             -DLauncher_BUILD_PLATFORM=official `
             -DLauncher_QT_VERSION_MAJOR=5 `
-            -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreadedDLL `
+            -DCMAKE_MSVC_RUNTIME_LIBRARY="MultiThreadedDLL" `
+            -A Win32 `
             -DLauncher_FORCE_BUNDLED_LIBS=ON
+
+      ##
+      # BUILD
+      ##
 
       - name: Build
         run: |
-          cmake --build $env:BUILD_DIR --config $env:BUILD_TYPE
+          cmake --build $env:BUILD_DIR --config Release
+
+      ##
+      # TEST
+      ##
+
+      - name: Test
+        run: |
+          ctest `
+            --test-dir $env:BUILD_DIR `
+            --output-on-failure `
+            -C Release `
+            -E "^example64|example$"
+
+      ##
+      # PACKAGE
+      ##
 
       - name: Install
         run: |
-          cmake --install $env:BUILD_DIR --config $env:BUILD_TYPE
+          cmake --install $env:BUILD_DIR --config Release
 
-      - name: Prepare portable package
+      - name: Create portable package
         shell: powershell
         run: |
-          New-Item -ItemType Directory -Force -Path install-portable | Out-Null
-          Copy-Item -Recurse -Force "install\*" "install-portable\"
+          cmake --install $env:BUILD_DIR `
+            --prefix $env:INSTALL_PORTABLE_DIR `
+            --component portable
 
-      - name: Create ZIP
+      - name: Create manifests
         shell: powershell
         run: |
-          Compress-Archive `
-            -Path "install-portable\*" `
-            -DestinationPath "PrismLauncher-x86.zip" `
-            -Force
+          Get-ChildItem $env:INSTALL_DIR -Recurse -File |
+            ForEach-Object FullName |
+            Resolve-Path -Relative |
+            ForEach-Object { $_.TrimStart('.\') } |
+            ForEach-Object { $_.TrimStart($env:INSTALL_DIR) } |
+            ForEach-Object { $_.TrimStart('\') } |
+            Out-File -FilePath "$env:INSTALL_DIR\manifest.txt"
 
-      - name: Upload x86 build
+          Get-ChildItem $env:INSTALL_PORTABLE_DIR -Recurse -File |
+            ForEach-Object FullName |
+            Resolve-Path -Relative |
+            ForEach-Object { $_.TrimStart('.\') } |
+            ForEach-Object { $_.TrimStart($env:INSTALL_PORTABLE_DIR) } |
+            ForEach-Object { $_.TrimStart('\') } |
+            Out-File -FilePath "$env:INSTALL_PORTABLE_DIR\manifest.txt"
+
+      ##
+      # INSTALLER
+      ##
+
+      - name: Create installer
+        shell: powershell
+        run: |
+          Set-Location $env:INSTALL_DIR
+          makensis -NOCD "$env:GITHUB_WORKSPACE\$env:BUILD_DIR\program_info\win_install.nsi"
+
+      ##
+      # UPLOAD
+      ##
+
+      - name: Upload Windows x86 package
         uses: actions/upload-artifact@v4
         with:
           name: PrismLauncher-x86
-          path: PrismLauncher-x86.zip
+          path: |
+            install/**
+            install-portable/**
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Upload Windows x86 installer
+        uses: actions/upload-artifact@v4
+        with:
+          name: PrismLauncher-x86-installer
+          path: install/PrismLauncher-Setup.exe
           if-no-files-found: error
           retention-days: 30
