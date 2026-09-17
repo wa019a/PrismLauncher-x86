@@ -44,6 +44,7 @@
 #include "ui/dialogs/ProgressDialog.h"
 #include "ui/dialogs/EditAccountDialog.h"
 #include "ui/dialogs/ProfileSetupDialog.h"
+#include "ui/dialogs/OfflineLoginDialog.h"
 
 #include <QLineEdit>
 #include <QInputDialog>
@@ -89,27 +90,22 @@ void LaunchController::decideAccount()
     auto accounts = APPLICATION->accounts();
     if (accounts->count() <= 0)
     {
-        // Tell the user they need to log in at least one account in order to play.
-        auto reply = CustomMessageBox::selectable(
+        auto account = OfflineLoginDialog::newAccount(
             m_parentWidget,
-            tr("No Accounts"),
-            tr("In order to play Minecraft, you must have at least one Microsoft or Mojang "
-               "account logged in. Mojang accounts can only be used offline. "
-               "Would you like to open the account manager to add an account now?"),
-            QMessageBox::Information,
-            QMessageBox::Yes | QMessageBox::No
-        )->exec();
+            tr("Please enter your desired username to add your offline account.")
+        );
 
-        if (reply == QMessageBox::Yes)
+        if (!account)
         {
-            // Open the account manager.
-            APPLICATION->ShowGlobalSettings(m_parentWidget, "accounts");
-        }
-        else if (reply == QMessageBox::No)
-        {
-            // Do not open "profile select" dialog.
             return;
         }
+
+        account->login()->start();
+        accounts->addAccount(account);
+        accounts->setDefaultAccount(account);
+        m_accountToUse = account;
+
+        return;
     }
 
     // Select the account to use. If the instance has a specific account set, that will be used. Otherwise, the default account will be used
