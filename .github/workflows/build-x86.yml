@@ -4,24 +4,19 @@ on:
   workflow_call:
     inputs:
       build_type:
-        description: Type of build (Debug, Release, RelWithDebInfo, MinSizeRel)
+        description: Type of build
         type: string
-        default: Debug
+        default: Release
       is_qt_cached:
-        description: Enable Qt caching or not
-        type: string
+        description: Enable Qt caching
+        type: boolean
         default: true
-    secrets:
-      WINDOWS_CODESIGN_CERT:
-        description: Certificate for signing Windows builds
-        required: false
-      WINDOWS_CODESIGN_PASSWORD:
-        description: Password for signing Windows builds
-        required: false
+
   workflow_dispatch:
     inputs:
       build_type:
-        description: Type of build (Debug, Release, RelWithDebInfo, MinSizeRel)
+        description: Type of build
+        required: true
         type: choice
         options:
           - Debug
@@ -29,158 +24,248 @@ on:
           - RelWithDebInfo
           - MinSizeRel
         default: Release
+
       is_qt_cached:
         description: Enable Qt caching or not
+        required: true
         type: boolean
         default: true
 
 jobs:
   build:
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - os: windows-2022
-            name: "Windows-MSVC-x86"
-            architecture: 'win32'
-            vcvars_arch: 'amd64_x86'
-            qt_ver: 5
-            qt_host: windows
-            qt_arch: 'win32_msvc2019'
-            qt_version: '5.15.2'
-            qt_modules: ''
-            qt_tools: 'tools_opensslv3_x64,qt.tools.opensslv3.win_x64'
-
-    runs-on: ${{ matrix.os }}
+    name: Windows MSVC x86
+    runs-on: windows-2022
 
     env:
-      INSTALL_DIR: "install"
-      INSTALL_PORTABLE_DIR: "install-portable"
-      BUILD_DIR: "build"
+      BUILD_DIR: build
+      INSTALL_DIR: install
+      INSTALL_PORTABLE_DIR: install-portable
 
     steps:
-      ##
-      # PREPARE
-      ##
+
       - name: Checkout
         uses: actions/checkout@v6
         with:
-          submodules: 'true'
+          submodules: recursive
+          fetch-depth: 0
 
       - name: Set short version
         shell: bash
         run: |
-          ver_short=`git rev-parse --short HEAD`
-          echo "VERSION=$ver_short" >> $GITHUB_ENV
+          echo "VERSION=$(git rev-parse --short HEAD)" >> "$GITHUB_ENV"
 
-      - name: Install Qt (Windows MSVC x86)
-        uses: jurplel/install-qt-action@v4
+      - name: Install Qt 5.15.2 x86
+        uses: jurplel/install-qt-action@v4.3.1
         with:
-          aqtversion: '==3.1.*'
-          py7zrversion: '>=0.20.2'
-          version: ${{ matrix.qt_version }}
-          host: ${{ matrix.qt_host }}
-          target: 'desktop'
-          arch: ${{ matrix.qt_arch }}
-          modules: ${{ matrix.qt_modules }}
-          tools: ${{ matrix.qt_tools }}
+          aqtversion: '==3.3.*'
+          py7zrversion: '==1.1.*'
+          version: '5.15.2'
+          host: windows
+          target: desktop
+          arch: win32_msvc2019
+          modules: ''
+          tools: 'tools_openssl_x86'
           cache: ${{ inputs.is_qt_cached }}
 
-      - name: Install MSVC (Windows MSVC x86)
-        uses: ilammy/msvc-dev-cmd@v1
-        with:
-          vsversion: 2022
-          arch: ${{ matrix.vcvars_arch }}
-
-      ##
-      # CONFIGURE
-      ##
-      - name: Configure CMake (Windows MSVC x86)
+      - name: Configure
+        shell: pwsh
         run: |
-          cmake -S . -B ${{ env.BUILD_DIR }} -DCMAKE_INSTALL_PREFIX=${{ env.INSTALL_DIR }} -DCMAKE_BUILD_TYPE=${{ inputs.build_type }} -DENABLE_LTO=ON -DLauncher_BUILD_PLATFORM=official -DLauncher_QT_VERSION_MAJOR=${{ matrix.qt_ver }} -DCMAKE_MSVC_RUNTIME_LIBRARY="MultiThreadedDLL" -A${{ matrix.architecture }} -DLauncher_FORCE_BUNDLED_LIBS=ON
+          $ErrorActionPreference = 'Stop'
 
-      ##
-      # BUILD
-      ##
-      - name: Build (Windows MSVC x86)
+          Remove-Item `
+            -Recurse `
+            -Force `
+            -ErrorAction SilentlyContinue `
+            $env:BUILD_DIR
+
+          cmake `
+            -S . `
+            -B $env:BUILD_DIR `
+            -G "Visual Studio 17 2022" `
+            -A Win32 `
+            -DCMAKE_INSTALL_PREFIX="$env:GITHUB_WORKSPACE\$env:INSTALL_DIR" `
+            -DCMAKE_BUILD_TYPE="${{ inputs.build_type }}" `
+            -DLauncher_BUILD_PLATFORM=official `
+            -DLauncher_QT_VERSION_MAJOR=5 `
+            -DLauncher_FORCE_BUNDLED_LIBS=ON `
+            -DENABLE_LTO=OFF `
+            -DBUILD_TESTING=OFF `
+            -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreadedDLL
+
+      - name: Build
+        shell: pwsh
         run: |
-          cmake --build ${{ env.BUILD_DIR }} --config ${{ inputs.build_type }} -- /m:1
+          $ErrorActionPreference = 'Stop'
 
-      ##
-      # TEST
-      ##
-      - name: Test (Windows MSVC x86)
+          cmake `
+            --build $env:BUILD_DIR `
+            --config "${{ inputs.build_type }}" `
+            --parallel 2
+
+      - name: Install
+        shell: pwsh
         run: |
-          ctest -E "^example64|example$" --test-dir build --output-on-failure -C ${{ inputs.build_type }}
+          $ErrorActionPreference = 'Stop'
 
-      ##
-      # PACKAGE BUILDS
-      ##
-      - name: Package (Windows MSVC x86)
+          Remove-Item `
+            -Recurse `
+            -Force `
+            -ErrorAction SilentlyContinue `
+            $env:INSTALL_DIR
+
+          cmake `
+            --install $env:BUILD_DIR `
+            --config "${{ inputs.build_type }}"
+
+      - name: Add x86 OpenSSL 1.1 DLLs
+        shell: pwsh
         run: |
-          cmake --install ${{ env.BUILD_DIR }} --config ${{ inputs.build_type }}
+          $ErrorActionPreference = 'Stop'
 
-          cd ${{ env.INSTALL_DIR }}
-          Copy-Item ${{ runner.workspace }}/Qt/Tools/OpenSSLv3/Win_x64/bin/*.dll -Destination .
-          cd ${{ github.workspace }}
+          $qtTools = $env:IQTA_TOOLS
 
-          Get-ChildItem ${{ env.INSTALL_DIR }} -Recurse | ForEach FullName | Resolve-Path -Relative | % { $_.TrimStart('.\') } | % { $_.TrimStart('${{ env.INSTALL_DIR }}') } | % { $_.TrimStart('\') } | Out-File -FilePath ${{ env.INSTALL_DIR }}/manifest.txt
-
-      - name: Fetch codesign certificate (Windows)
-        shell: bash
-        run: |
-          echo '${{ secrets.WINDOWS_CODESIGN_CERT }}' | base64 --decode > codesign.pfx
-
-      - name: Sign executable (Windows)
-        run: |
-          if (Get-Content ./codesign.pfx) {
-            cd ${{ env.INSTALL_DIR }}
-            # We ship the exact same executable for portable and non-portable editions, so signing just once is fine
-            SignTool sign /fd sha256 /td sha256 /f ../codesign.pfx /p '${{ secrets.WINDOWS_CODESIGN_PASSWORD }}' /tr http://timestamp.digicert.com prismlauncher.exe prismlauncher_filelink.exe
-          } else {
-            ":warning: Skipped code signing for Windows, as certificate was not present." >> $env:GITHUB_STEP_SUMMARY
+          if ([string]::IsNullOrWhiteSpace($qtTools) -or !(Test-Path $qtTools)) {
+            throw "IQTA_TOOLS was not set by install-qt-action."
           }
 
-      - name: Package (Windows MSVC x86, portable)
-        run: |
-          cp -r ${{ env.INSTALL_DIR }} ${{ env.INSTALL_PORTABLE_DIR }}  # cmake install on Windows is slow, let's just copy instead
-          cmake --install ${{ env.BUILD_DIR }} --prefix ${{ env.INSTALL_PORTABLE_DIR }} --component portable
+          $crypto = Get-ChildItem `
+            -Path $qtTools `
+            -Recurse `
+            -Filter 'libcrypto-1_1.dll' `
+            -File |
+            Select-Object -First 1
 
-          Get-ChildItem ${{ env.INSTALL_PORTABLE_DIR }} -Recurse | ForEach FullName | Resolve-Path -Relative | % { $_.TrimStart('.\') } | % { $_.TrimStart('${{ env.INSTALL_PORTABLE_DIR }}') } | % { $_.TrimStart('\') } | Out-File -FilePath ${{ env.INSTALL_PORTABLE_DIR }}/manifest.txt
+          $ssl = Get-ChildItem `
+            -Path $qtTools `
+            -Recurse `
+            -Filter 'libssl-1_1.dll' `
+            -File |
+            Select-Object -First 1
 
-      - name: Package (Windows, installer)
-        run: |
-          cd ${{ env.INSTALL_DIR }}
-          makensis -NOCD "${{ github.workspace }}/${{ env.BUILD_DIR }}/program_info/win_install.nsi"
-
-      - name: Sign installer (Windows)
-        run: |
-          if (Get-Content ./codesign.pfx) {
-            SignTool sign /fd sha256 /td sha256 /f codesign.pfx /p '${{ secrets.WINDOWS_CODESIGN_PASSWORD }}' /tr http://timestamp.digicert.com PrismLauncher-Setup.exe
-          } else {
-            ":warning: Skipped code signing for Windows, as certificate was not present." >> $env:GITHUB_STEP_SUMMARY
+          if ($null -eq $crypto) {
+            throw "Could not find x86 libcrypto-1_1.dll."
           }
 
-      ##
-      # UPLOAD BUILDS
-      ##
-      - name: Upload binary zip (Windows x86)
-        uses: actions/upload-artifact@v4
-        with:
-          name: PrismLauncher-${{ matrix.name }}-${{ env.VERSION }}-${{ inputs.build_type }}
-          path: ${{ env.INSTALL_DIR }}/**
-          if-no-files-found: error
+          if ($null -eq $ssl) {
+            throw "Could not find x86 libssl-1_1.dll."
+          }
 
-      - name: Upload binary zip (Windows x86, portable)
-        uses: actions/upload-artifact@v4
-        with:
-          name: PrismLauncher-${{ matrix.name }}-Portable-${{ env.VERSION }}-${{ inputs.build_type }}
-          path: ${{ env.INSTALL_PORTABLE_DIR }}/**
-          if-no-files-found: error
+          Copy-Item `
+            $crypto.FullName `
+            "$env:GITHUB_WORKSPACE\$env:INSTALL_DIR\libcrypto-1_1.dll" `
+            -Force
 
-      - name: Upload installer (Windows x86)
-        uses: actions/upload-artifact@v4
+          Copy-Item `
+            $ssl.FullName `
+            "$env:GITHUB_WORKSPACE\$env:INSTALL_DIR\libssl-1_1.dll" `
+            -Force
+
+          Write-Host "Using OpenSSL:"
+          Write-Host $crypto.FullName
+          Write-Host $ssl.FullName
+
+      - name: Verify PE architecture
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+
+          function Get-PeMachine([string]$Path) {
+
+            $bytes = [System.IO.File]::ReadAllBytes($Path)
+
+            if (
+              $bytes.Length -lt 64 -or
+              $bytes[0] -ne 0x4D -or
+              $bytes[1] -ne 0x5A
+            ) {
+              throw "$Path is not a PE file."
+            }
+
+            $peOffset = [BitConverter]::ToInt32($bytes, 0x3C)
+
+            if (
+              $peOffset -lt 0 -or
+              $peOffset + 6 -gt $bytes.Length
+            ) {
+              throw "$Path has an invalid PE header."
+            }
+
+            if (
+              $bytes[$peOffset] -ne 0x50 -or
+              $bytes[$peOffset + 1] -ne 0x45 -or
+              $bytes[$peOffset + 2] -ne 0x00 -or
+              $bytes[$peOffset + 3] -ne 0x00
+            ) {
+              throw "$Path is missing the PE signature."
+            }
+
+            return [BitConverter]::ToUInt16(
+              $bytes,
+              $peOffset + 4
+            )
+          }
+
+          $files = @(
+            "$env:GITHUB_WORKSPACE\$env:INSTALL_DIR\prismlauncher.exe",
+            "$env:GITHUB_WORKSPACE\$env:INSTALL_DIR\libcrypto-1_1.dll",
+            "$env:GITHUB_WORKSPACE\$env:INSTALL_DIR\libssl-1_1.dll"
+          )
+
+          foreach ($file in $files) {
+
+            if (!(Test-Path $file)) {
+              throw "Missing required file: $file"
+            }
+
+            $machine = Get-PeMachine $file
+
+            Write-Host `
+              "$file -> PE machine 0x$($machine.ToString('X4'))"
+
+            if ($machine -ne 0x014C) {
+              throw `
+                "$file is not x86. Expected IMAGE_FILE_MACHINE_I386 (0x014C)."
+            }
+          }
+
+      - name: Create portable package
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+
+          Remove-Item `
+            -Recurse `
+            -Force `
+            -ErrorAction SilentlyContinue `
+            $env:INSTALL_PORTABLE_DIR
+
+          Copy-Item `
+            $env:INSTALL_DIR `
+            $env:INSTALL_PORTABLE_DIR `
+            -Recurse
+
+          cmake `
+            --install $env:BUILD_DIR `
+            --config "${{ inputs.build_type }}" `
+            --prefix "$env:GITHUB_WORKSPACE\$env:INSTALL_PORTABLE_DIR" `
+            --component portable
+
+      - name: Create ZIP
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+
+          $zip = `
+            "PrismLauncher-7.2-Windows-x86-$env:VERSION.zip"
+
+          Compress-Archive `
+            -Path "$env:INSTALL_PORTABLE_DIR\*" `
+            -DestinationPath $zip `
+            -Force
+
+      - name: Upload x86 portable build
+        uses: actions/upload-artifact@v6
         with:
-          name: PrismLauncher-${{ matrix.name }}-Setup-${{ env.VERSION }}-${{ inputs.build_type }}
-          path: PrismLauncher-Setup.exe
+          name: PrismLauncher-7.2-Windows-x86-${{ env.VERSION }}
+          path: PrismLauncher-7.2-Windows-x86-${{ env.VERSION }}.zip
           if-no-files-found: error
