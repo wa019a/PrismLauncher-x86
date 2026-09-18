@@ -28,7 +28,6 @@ jobs:
           host: windows
           target: desktop
           arch: win32_msvc2019
-          modules: qtimageformats
           cache: false
 
       - name: Show Qt installation
@@ -111,50 +110,6 @@ jobs:
           }
 
           Write-Host "Confirmed: 32-bit x86 executable."
-
-      - name: Locate OpenSSL DLLs
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = 'Stop'
-
-          Write-Host "Searching runner for x86 OpenSSL 1.1 DLLs..."
-
-          $matches = Get-ChildItem `
-            -Path "C:\", "D:\" `
-            -Filter "libcrypto-1_1.dll" `
-            -Recurse `
-            -ErrorAction SilentlyContinue |
-            Where-Object {
-              $_.FullName -match "OpenSSL|Win_x86|Qt"
-            }
-
-          if (!$matches) {
-            throw "No libcrypto-1_1.dll matching an x86 Qt/OpenSSL installation was found."
-          }
-
-          foreach ($file in $matches) {
-            Write-Host $file.FullName
-          }
-
-          $crypto = $matches | Select-Object -First 1
-          $ssl = Join-Path $crypto.Directory.FullName "libssl-1_1.dll"
-
-          if (!(Test-Path $ssl)) {
-            throw "Found libcrypto but not matching libssl: $ssl"
-          }
-
-          "OPENSSL_CRYPTO=$($crypto.FullName)" >> $env:GITHUB_ENV
-          "OPENSSL_SSL=$ssl" >> $env:GITHUB_ENV
-
-      - name: Copy OpenSSL
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = 'Stop'
-
-          $install = "${{ github.workspace }}\install"
-
-          Copy-Item "$env:OPENSSL_CRYPTO" "$install\libcrypto-1_1.dll" -Force
-          Copy-Item "$env:OPENSSL_SSL" "$install\libssl-1_1.dll" -Force
 
       - name: Create ZIP
         shell: pwsh
