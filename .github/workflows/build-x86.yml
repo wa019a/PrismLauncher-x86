@@ -1,69 +1,19 @@
 name: Build x86
 
 on:
-  workflow_call:
-    inputs:
-      build_type:
-        description: Type of build
-        type: string
-        required: false
-        default: Release
-
-      is_qt_cached:
-        description: Enable Qt caching
-        type: boolean
-        required: false
-        default: false
-
   workflow_dispatch:
-    inputs:
-      build_type:
-        description: Type of build
-        required: true
-        type: choice
-        options:
-          - Debug
-          - Release
-          - RelWithDebInfo
-          - MinSizeRel
-        default: Release
-
-      is_qt_cached:
-        description: Enable Qt caching
-        required: true
-        type: boolean
-        default: false
-
 
 jobs:
   build:
-    name: Windows x86
+    name: Build Windows x86
     runs-on: windows-2022
 
-    env:
-      BUILD_DIR: build
-      INSTALL_DIR: install
-
     steps:
-
-      # ============================================================
-      # SOURCE
-      # ============================================================
-
-      - name: Checkout repository
+      - name: Checkout
         uses: actions/checkout@v4
         with:
-          fetch-depth: 0
           submodules: recursive
-
-
-      # ============================================================
-      # JAVA
-      #
-      # Your libraries/launcher/CMakeLists.txt requires Java >= 1.7
-      # and explicitly compiles NewLaunch with -source 7 -target 7.
-      # JDK 8 is therefore appropriate.
-      # ============================================================
+          fetch-depth: 0
 
       - name: Setup Java 8
         uses: actions/setup-java@v4
@@ -71,106 +21,23 @@ jobs:
           distribution: temurin
           java-version: '8'
 
-
-      # ============================================================
-      # MSVC
-      #
-      # amd64_x86 = 64-bit host compiler targeting 32-bit x86.
-      # CMake's Visual Studio generator uses Win32 for that target.
-      # ============================================================
-
       - name: Setup MSVC x86
         uses: ilammy/msvc-dev-cmd@v1
         with:
           arch: amd64_x86
-          vsversion: '2022'
 
-
-      # ============================================================
-      # ENVIRONMENT CHECK
-      # ============================================================
-
-      - name: Verify build tools
+      - name: Verify compiler
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-
-          Write-Host "=============================="
-          Write-Host "CMake"
-          Write-Host "=============================="
-          cmake --version
-
-          if ($LASTEXITCODE -ne 0) {
-            throw "CMake is unavailable."
-          }
-
-          Write-Host ""
-          Write-Host "=============================="
-          Write-Host "Java"
-          Write-Host "=============================="
-          java -version
-
-          if ($LASTEXITCODE -ne 0) {
-            throw "Java is unavailable."
-          }
-
-          Write-Host ""
-          Write-Host "=============================="
-          Write-Host "MSVC"
-          Write-Host "=============================="
 
           where.exe cl
 
           if ($LASTEXITCODE -ne 0) {
-            throw "cl.exe was not found in PATH."
+            throw "MSVC compiler was not found."
           }
 
-          cl 2>&1 | Select-Object -First 4
-
-          Write-Host ""
-          Write-Host "=============================="
-          Write-Host "7-Zip"
-          Write-Host "=============================="
-
-          where.exe 7z
-
-          if ($LASTEXITCODE -ne 0) {
-            throw "7z.exe was not found in PATH."
-          }
-
-          7z i | Select-Object -First 5
-
-
-      # ============================================================
-      # VERSION
-      # ============================================================
-
-      - name: Set build version
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = 'Stop'
-
-          $version = (
-            git rev-parse --short HEAD
-          ).Trim()
-
-          if ([string]::IsNullOrWhiteSpace($version)) {
-            throw "Could not determine Git revision."
-          }
-
-          "VERSION=$version" >> $env:GITHUB_ENV
-
-          Write-Host "Build revision: $version"
-
-
-      # ============================================================
-      # QT 5.15.2 x86
-      #
-      # DO NOT install OpenSSL through the tools: field here.
-      #
-      # The current Qt x86 repository no longer exposes the old
-      # tools_openssl_x86 package. We handle that separately below.
-      # ============================================================
+          cl 2>&1 | Select-Object -First 5
 
       - name: Install Qt 5.15.2 x86
         uses: jurplel/install-qt-action@v4
@@ -183,13 +50,7 @@ jobs:
           tools: ''
           aqtversion: '==3.3.0'
           py7zrversion: '==1.1.2'
-          cache: ${{ inputs.is_qt_cached }}
           extra: '--external 7z'
-
-
-      # ============================================================
-      # VERIFY QT
-      # ============================================================
 
       - name: Verify Qt
         shell: pwsh
@@ -197,56 +58,24 @@ jobs:
           $ErrorActionPreference = 'Stop'
 
           if ([string]::IsNullOrWhiteSpace($env:QT_ROOT_DIR)) {
-            throw "install-qt-action did not provide QT_ROOT_DIR."
+            throw "QT_ROOT_DIR is empty."
           }
 
-          Write-Host "QT_ROOT_DIR:"
-          Write-Host $env:QT_ROOT_DIR
+          Write-Host "Qt: $env:QT_ROOT_DIR"
 
-          $qmake = Join-Path `
-            $env:QT_ROOT_DIR `
-            'bin\qmake.exe'
+          $qmake = Join-Path $env:QT_ROOT_DIR 'bin\qmake.exe'
 
-          $qtCore = Join-Path `
-            $env:QT_ROOT_DIR `
-            'bin\Qt5Core.dll'
-
-          $qtConfig = Join-Path `
-            $env:QT_ROOT_DIR `
-            'lib\cmake\Qt5\Qt5Config.cmake'
-
-          foreach ($path in @(
-            $qmake,
-            $qtCore,
-            $qtConfig
-          )) {
-            if (!(Test-Path -LiteralPath $path)) {
-              throw "Required Qt file is missing: $path"
-            }
-
-            Write-Host "Found: $path"
+          if (!(Test-Path -LiteralPath $qmake)) {
+            throw "qmake.exe was not found."
           }
 
-          $version = (
-            & $qmake -query QT_VERSION
-          ).Trim()
+          & $qmake -query QT_VERSION
 
           if ($LASTEXITCODE -ne 0) {
             throw "qmake failed."
           }
 
-          Write-Host "Qt version: $version"
-
-          if ($version -ne '5.15.2') {
-            throw "Expected Qt 5.15.2, got $version."
-          }
-
-
-      # ============================================================
-      # INSTALL AQT FOR THE OLD OPENSSL TOOL
-      # ============================================================
-
-      - name: Install aqtinstall
+      - name: Install aqt
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
@@ -257,69 +86,37 @@ jobs:
             "aqtinstall==3.3.0"
 
           if ($LASTEXITCODE -ne 0) {
-            throw "Failed to install aqtinstall 3.3.0."
+            throw "aqtinstall installation failed."
           }
 
-          python -m aqt version
-
-          if ($LASTEXITCODE -ne 0) {
-            throw "aqtinstall is not functioning."
-          }
-
-
-      # ============================================================
-      # INSTALL OPENSSL 1.1.x x86
-      #
-      # Qt 5.15.2 requires the Qt-compatible OpenSSL 1.1.x runtime
-      # for HTTPS/TLS on Windows.
-      #
-      # The current windows_x86 Qt repository no longer exposes
-      # tools_openssl_x86, so we use the archived Qt repository.
-      #
-      # First try aqt metadata.
-      #
-      # If the archived metadata is unavailable, fall back to the
-      # historically documented Qt package:
-      #
-      # 1.1.1-22openssl_1.1.1v_prebuild_x86.7z
-      #
-      # This exact archive was used in a real Qt 5.15.2 32-bit
-      # Windows development image.
-      # ============================================================
-
-      - name: Install Qt OpenSSL 1.1 x86
+      - name: Install Qt OpenSSL x86
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
 
           $qtRoot = $env:QT_ROOT_DIR
 
-          if ([string]::IsNullOrWhiteSpace($qtRoot)) {
-            throw "QT_ROOT_DIR is empty."
-          }
+          $archiveBase = 'https://master.qt.io/online/qtsdkrepository'
 
-          Write-Host "Qt root:"
-          Write-Host $qtRoot
+          $archiveName = '1.1.1-22openssl_1.1.1v_prebuild_x86.7z'
 
-          $archiveBase =
-            'https://master.qt.io/online/qtsdkrepository'
+          $archiveUrl = (
+            "$archiveBase/" +
+            "windows_x86/desktop/" +
+            "tools_openssl_x86/" +
+            "qt.tools.openssl.win_x86/" +
+            "$archiveName"
+          )
 
-          $archiveName =
-            '1.1.1-22openssl_1.1.1v_prebuild_x86.7z'
+          $archivePath = Join-Path `
+            $env:RUNNER_TEMP `
+            $archiveName
 
-          $archiveUrl =
-            "$archiveBase/windows_x86/desktop/tools_openssl_x86/" +
-            "qt.tools.openssl.win_x86/$archiveName"
+          Write-Host "Checking archived Qt OpenSSL metadata..."
 
-          Write-Host ""
-          Write-Host "================================================"
-          Write-Host "Attempting archived Qt OpenSSL metadata install"
-          Write-Host "================================================"
-
-          $aqtSucceeded = $false
+          $installed = $false
 
           try {
-
             python -m aqt list-tool `
               windows `
               desktop `
@@ -327,10 +124,7 @@ jobs:
               --base $archiveBase
 
             if ($LASTEXITCODE -eq 0) {
-
-              Write-Host ""
-              Write-Host "aqt metadata found."
-              Write-Host "Installing OpenSSL x86..."
+              Write-Host "Archived metadata is available."
 
               python -m aqt install-tool `
                 --outputdir "$qtRoot" `
@@ -342,202 +136,83 @@ jobs:
                 qt.tools.openssl.win_x86
 
               if ($LASTEXITCODE -eq 0) {
-                $aqtSucceeded = $true
-                Write-Host "aqt OpenSSL installation succeeded."
-              }
-              else {
-                Write-Warning `
-                  "aqt metadata was readable, but installation failed."
+                $installed = $true
               }
             }
-            else {
-              Write-Warning `
-                "Archived OpenSSL metadata could not be read."
-            }
-
           }
           catch {
-            Write-Warning `
-              "aqt OpenSSL installation failed: $($_.Exception.Message)"
+            Write-Warning "aqt archived installation failed: $($_.Exception.Message)"
           }
 
-          # --------------------------------------------------------
-          # FALLBACK
-          # --------------------------------------------------------
+          if (!$installed) {
+            Write-Host "Trying historical Qt OpenSSL archive..."
 
-          if (!$aqtSucceeded) {
-
-            Write-Host ""
-            Write-Host "================================================"
-            Write-Host "Falling back to known Qt OpenSSL archive"
-            Write-Host "================================================"
-
-            Write-Host "URL:"
-            Write-Host $archiveUrl
-
-            $archivePath = Join-Path `
-              $env:RUNNER_TEMP `
-              $archiveName
-
-            if (Test-Path -LiteralPath $archivePath) {
-              Remove-Item `
-                -LiteralPath $archivePath `
-                -Force
-            }
-
-            $downloaded = $false
-
-            # Try the archived Qt mirror first.
             try {
-
               Invoke-WebRequest `
                 -Uri $archiveUrl `
                 -OutFile $archivePath `
                 -UseBasicParsing
 
-              if (
-                (Test-Path -LiteralPath $archivePath) -and
-                ((Get-Item -LiteralPath $archivePath).Length -gt 1000000)
-              ) {
-                $downloaded = $true
-                Write-Host "Downloaded archive from archived Qt mirror."
+              if (!(Test-Path -LiteralPath $archivePath)) {
+                throw "Archive was not downloaded."
               }
 
+              $size = (Get-Item -LiteralPath $archivePath).Length
+
+              if ($size -lt 1000000) {
+                throw "Downloaded archive is suspiciously small: $size bytes."
+              }
+
+              7z x `
+                $archivePath `
+                "-o$qtRoot" `
+                -y
+
+              if ($LASTEXITCODE -ne 0) {
+                throw "7-Zip extraction failed."
+              }
+
+              $installed = $true
             }
             catch {
-
-              Write-Warning `
-                "Archived Qt mirror download failed: $($_.Exception.Message)"
-            }
-
-            # The historical package was also published on the
-            # normal Qt mirror. It may no longer be present there,
-            # so this is only a secondary fallback.
-            if (!$downloaded) {
-
-              $downloadUrl =
-                'https://download.qt.io/online/qtsdkrepository/' +
-                'windows_x86/desktop/tools_openssl_x86/' +
-                'qt.tools.openssl.win_x86/' +
-                $archiveName
-
-              Write-Host ""
-              Write-Host "Trying historical official Qt mirror:"
-              Write-Host $downloadUrl
-
-              try {
-
-                Invoke-WebRequest `
-                  -Uri $downloadUrl `
-                  -OutFile $archivePath `
-                  -UseBasicParsing
-
-                if (
-                  (Test-Path -LiteralPath $archivePath) -and
-                  ((Get-Item -LiteralPath $archivePath).Length -gt 1000000)
-                ) {
-                  $downloaded = $true
-                  Write-Host "Downloaded archive from official Qt mirror."
-                }
-
-              }
-              catch {
-
-                Write-Warning `
-                  "Official Qt mirror download failed: $($_.Exception.Message)"
-              }
-            }
-
-            if (!$downloaded) {
               throw @"
-Could not obtain Qt OpenSSL x86.
+Could not install Qt OpenSSL x86.
 
-The archived aqt metadata installation failed and neither
-known Qt archive URL was downloadable.
+aqt installation failed and the historical Qt archive
+could not be downloaded/extracted.
 
-Expected archive:
+Archive:
 $archiveName
 
-Expected archived URL:
+URL:
 $archiveUrl
+
+Error:
+$($_.Exception.Message)
 "@
             }
-
-            Write-Host ""
-            Write-Host "Extracting OpenSSL archive..."
-
-            7z x `
-              $archivePath `
-              "-o$qtRoot" `
-              -y
-
-            if ($LASTEXITCODE -ne 0) {
-              throw "7-Zip failed to extract the OpenSSL archive."
-            }
-
-            Write-Host "OpenSSL archive extracted."
           }
 
+          Write-Host "OpenSSL installation completed."
 
-      # ============================================================
-      # LOCATE OPENSSL DLLS
-      # ============================================================
-
-      - name: Locate OpenSSL x86 DLLs
+      - name: Locate OpenSSL
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
 
-          $qtRoot = $env:QT_ROOT_DIR
+          $crypto = Get-ChildItem `
+            -Path $env:QT_ROOT_DIR `
+            -Recurse `
+            -Filter 'libcrypto-1_1.dll' `
+            -File |
+            Select-Object -First 1
 
-          $expectedDirectory = Join-Path `
-            $qtRoot `
-            'Tools\OpenSSL\Win_x86\bin'
-
-          Write-Host "Expected OpenSSL directory:"
-          Write-Host $expectedDirectory
-
-          $crypto = $null
-          $ssl = $null
-
-          # First check the canonical Qt location.
-          $canonicalCrypto = Join-Path `
-            $expectedDirectory `
-            'libcrypto-1_1.dll'
-
-          $canonicalSsl = Join-Path `
-            $expectedDirectory `
-            'libssl-1_1.dll'
-
-          if (Test-Path -LiteralPath $canonicalCrypto) {
-            $crypto = Get-Item -LiteralPath $canonicalCrypto
-          }
-
-          if (Test-Path -LiteralPath $canonicalSsl) {
-            $ssl = Get-Item -LiteralPath $canonicalSsl
-          }
-
-          # If aqt chose a slightly different layout, search the
-          # Qt tree rather than blindly assuming the path.
-          if ($null -eq $crypto) {
-
-            $crypto = Get-ChildItem `
-              -Path $qtRoot `
-              -Recurse `
-              -Filter 'libcrypto-1_1.dll' `
-              -File |
-              Select-Object -First 1
-          }
-
-          if ($null -eq $ssl) {
-
-            $ssl = Get-ChildItem `
-              -Path $qtRoot `
-              -Recurse `
-              -Filter 'libssl-1_1.dll' `
-              -File |
-              Select-Object -First 1
-          }
+          $ssl = Get-ChildItem `
+            -Path $env:QT_ROOT_DIR `
+            -Recurse `
+            -Filter 'libssl-1_1.dll' `
+            -File |
+            Select-Object -First 1
 
           if ($null -eq $crypto) {
             throw "libcrypto-1_1.dll was not found."
@@ -547,27 +222,11 @@ $archiveUrl
             throw "libssl-1_1.dll was not found."
           }
 
-          Write-Host ""
-          Write-Host "libcrypto:"
-          Write-Host $crypto.FullName
+          Write-Host "Crypto: $($crypto.FullName)"
+          Write-Host "SSL:    $($ssl.FullName)"
 
-          Write-Host ""
-          Write-Host "libssl:"
-          Write-Host $ssl.FullName
-
-          "OPENSSL_X86_CRYPTO=$($crypto.FullName)" >> $env:GITHUB_ENV
-          "OPENSSL_X86_SSL=$($ssl.FullName)" >> $env:GITHUB_ENV
-
-
-      # ============================================================
-      # VERIFY OPENSSL PE ARCHITECTURE
-      #
-      # IMAGE_FILE_MACHINE_I386 = 0x014C
-      # IMAGE_FILE_MACHINE_AMD64 = 0x8664
-      #
-      # This catches the exact x86/x64 mistake that can otherwise
-      # survive until runtime.
-      # ============================================================
+          "OPENSSL_CRYPTO=$($crypto.FullName)" >> $env:GITHUB_ENV
+          "OPENSSL_SSL=$($ssl.FullName)" >> $env:GITHUB_ENV
 
       - name: Verify OpenSSL is x86
         shell: pwsh
@@ -575,309 +234,144 @@ $archiveUrl
           $ErrorActionPreference = 'Stop'
 
           function Get-PeMachine([string]$Path) {
-
             $bytes = [System.IO.File]::ReadAllBytes($Path)
 
             if ($bytes.Length -lt 64) {
-              throw "$Path is too small to be a PE file."
+              throw "$Path is too small."
             }
 
             if (
               $bytes[0] -ne 0x4D -or
               $bytes[1] -ne 0x5A
             ) {
-              throw "$Path does not have an MZ header."
+              throw "$Path is not a PE file."
             }
 
-            $peOffset = [BitConverter]::ToInt32(
+            $offset = [BitConverter]::ToInt32(
               $bytes,
               0x3C
             )
 
             if (
-              $peOffset -lt 0 -or
-              ($peOffset + 6) -gt $bytes.Length
+              $offset -lt 0 -or
+              $offset + 6 -gt $bytes.Length
             ) {
               throw "$Path has an invalid PE offset."
             }
 
             if (
-              $bytes[$peOffset] -ne 0x50 -or
-              $bytes[$peOffset + 1] -ne 0x45 -or
-              $bytes[$peOffset + 2] -ne 0x00 -or
-              $bytes[$peOffset + 3] -ne 0x00
+              $bytes[$offset] -ne 0x50 -or
+              $bytes[$offset + 1] -ne 0x45 -or
+              $bytes[$offset + 2] -ne 0x00 -or
+              $bytes[$offset + 3] -ne 0x00
             ) {
-              throw "$Path does not have a PE signature."
+              throw "$Path has no PE signature."
             }
 
             return [BitConverter]::ToUInt16(
               $bytes,
-              $peOffset + 4
+              $offset + 4
             )
           }
 
           foreach ($dll in @(
-            $env:OPENSSL_X86_CRYPTO,
-            $env:OPENSSL_X86_SSL
+            $env:OPENSSL_CRYPTO,
+            $env:OPENSSL_SSL
           )) {
-
             $machine = Get-PeMachine $dll
 
-            $machineHex = $machine.ToString('X4')
-
-            Write-Host ""
-            Write-Host "$dll"
-            Write-Host "PE machine: 0x$machineHex"
+            Write-Host "$dll -> 0x$($machine.ToString('X4'))"
 
             if ($machine -ne 0x014C) {
-
-              throw (
-                "$dll is not x86. " +
-                "Expected IMAGE_FILE_MACHINE_I386 " +
-                "(0x014C), got 0x$machineHex."
-              )
+              throw "$dll is not x86."
             }
           }
 
-          Write-Host ""
-          Write-Host "Both OpenSSL DLLs are confirmed x86."
-
-
-      # ============================================================
-      # CLEAN BUILD
-      # ============================================================
-
-      - name: Clean build directories
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = 'Stop'
-
-          foreach ($directory in @(
-            $env:BUILD_DIR,
-            $env:INSTALL_DIR
-          )) {
-
-            if (Test-Path -LiteralPath $directory) {
-
-              Remove-Item `
-                -LiteralPath $directory `
-                -Recurse `
-                -Force
-            }
-          }
-
-
-      # ============================================================
-      # CMAKE CONFIGURE
-      #
-      # NOTE:
-      #
-      # Visual Studio is a multi-config generator, so we deliberately
-      # do NOT pass CMAKE_BUILD_TYPE here.
-      #
-      # Release/Debug/etc is selected by --config during build/install.
-      # ============================================================
+          Write-Host "OpenSSL is confirmed x86."
 
       - name: Configure CMake
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
 
-          $installPrefix = Join-Path `
+          $install = Join-Path `
             $env:GITHUB_WORKSPACE `
-            $env:INSTALL_DIR
+            'install'
 
-          $cmakeArgs = @(
-            '-S', '.',
-            '-B', $env:BUILD_DIR,
-
-            '-G',
-            'Visual Studio 17 2022',
-
-            '-A',
-            'Win32',
-
-            "-DCMAKE_INSTALL_PREFIX=$installPrefix",
-
-            '-DLauncher_BUILD_PLATFORM=official',
-            '-DLauncher_QT_VERSION_MAJOR=5',
-            '-DLauncher_FORCE_BUNDLED_LIBS=ON',
-
-            '-DENABLE_LTO=OFF',
-            '-DDEBUG_ADDRESS_SANITIZER=OFF',
-
-            '-DBUILD_TESTING=OFF',
-
-            '-DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreadedDLL'
-          )
-
-          Write-Host "CMake arguments:"
-          foreach ($argument in $cmakeArgs) {
-            Write-Host "  $argument"
-          }
-
-          & cmake @cmakeArgs
+          cmake `
+            -S . `
+            -B build `
+            -G "Visual Studio 17 2022" `
+            -A Win32 `
+            "-DCMAKE_INSTALL_PREFIX=$install" `
+            -DLauncher_BUILD_PLATFORM=official `
+            -DLauncher_QT_VERSION_MAJOR=5 `
+            -DLauncher_FORCE_BUNDLED_LIBS=ON `
+            -DENABLE_LTO=OFF `
+            -DDEBUG_ADDRESS_SANITIZER=OFF `
+            -DBUILD_TESTING=OFF `
+            -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreadedDLL
 
           if ($LASTEXITCODE -ne 0) {
-            throw "CMake configuration failed with exit code $LASTEXITCODE."
+            throw "CMake configuration failed."
           }
 
-
-      # ============================================================
-      # BUILD
-      # ============================================================
-
-      - name: Build Prism Launcher
+      - name: Build
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
 
-          Write-Host "Building:"
-          Write-Host "  Configuration: ${{ inputs.build_type }}"
-          Write-Host "  Architecture: Win32 / x86"
-
-          & cmake `
-            --build $env:BUILD_DIR `
-            --config "${{ inputs.build_type }}" `
+          cmake `
+            --build build `
+            --config Release `
             --parallel 2
 
           if ($LASTEXITCODE -ne 0) {
-            throw "CMake build failed with exit code $LASTEXITCODE."
+            throw "Build failed."
           }
 
-
-      # ============================================================
-      # INSTALL
-      #
-      # Your actual launcher/CMakeLists.txt installs the Windows
-      # executables and the full Qt Runtime bundle as COMPONENT Runtime.
-      #
-      # No separate "portable" component invocation is needed here.
-      # ============================================================
-
-      - name: Install Prism Launcher
+      - name: Install
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
 
-          & cmake `
-            --install $env:BUILD_DIR `
-            --config "${{ inputs.build_type }}"
+          cmake `
+            --install build `
+            --config Release
 
           if ($LASTEXITCODE -ne 0) {
-            throw "CMake installation failed with exit code $LASTEXITCODE."
+            throw "Install failed."
           }
 
-
-      # ============================================================
-      # COPY OPENSSL RUNTIME DLLS
-      # ============================================================
-
-      - name: Copy OpenSSL runtime DLLs
+      - name: Copy OpenSSL
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
 
-          $installRoot = Join-Path `
+          $install = Join-Path `
             $env:GITHUB_WORKSPACE `
-            $env:INSTALL_DIR
-
-          $cryptoDestination = Join-Path `
-            $installRoot `
-            'libcrypto-1_1.dll'
-
-          $sslDestination = Join-Path `
-            $installRoot `
-            'libssl-1_1.dll'
+            'install'
 
           Copy-Item `
-            -LiteralPath $env:OPENSSL_X86_CRYPTO `
-            -Destination $cryptoDestination `
+            -LiteralPath $env:OPENSSL_CRYPTO `
+            -Destination (Join-Path $install 'libcrypto-1_1.dll') `
             -Force
 
           Copy-Item `
-            -LiteralPath $env:OPENSSL_X86_SSL `
-            -Destination $sslDestination `
+            -LiteralPath $env:OPENSSL_SSL `
+            -Destination (Join-Path $install 'libssl-1_1.dll') `
             -Force
 
-          if (!(Test-Path -LiteralPath $cryptoDestination)) {
-            throw "libcrypto-1_1.dll was not copied."
-          }
-
-          if (!(Test-Path -LiteralPath $sslDestination)) {
-            throw "libssl-1_1.dll was not copied."
-          }
-
-          Write-Host "OpenSSL runtime DLLs copied successfully."
-
-
-      # ============================================================
-      # VERIFY FINAL PACKAGE
-      # ============================================================
-
-      - name: Verify final installation
+      - name: Verify final package
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
 
-          function Get-PeMachine([string]$Path) {
-
-            $bytes = [System.IO.File]::ReadAllBytes($Path)
-
-            if ($bytes.Length -lt 64) {
-              throw "$Path is too small to be a PE file."
-            }
-
-            if (
-              $bytes[0] -ne 0x4D -or
-              $bytes[1] -ne 0x5A
-            ) {
-              throw "$Path does not have an MZ header."
-            }
-
-            $peOffset = [BitConverter]::ToInt32(
-              $bytes,
-              0x3C
-            )
-
-            if (
-              $peOffset -lt 0 -or
-              ($peOffset + 6) -gt $bytes.Length
-            ) {
-              throw "$Path has an invalid PE offset."
-            }
-
-            if (
-              $bytes[$peOffset] -ne 0x50 -or
-              $bytes[$peOffset + 1] -ne 0x45 -or
-              $bytes[$peOffset + 2] -ne 0x00 -or
-              $bytes[$peOffset + 3] -ne 0x00
-            ) {
-              throw "$Path does not have a PE signature."
-            }
-
-            return [BitConverter]::ToUInt16(
-              $bytes,
-              $peOffset + 4
-            )
-          }
-
-          $installRoot = Join-Path `
+          $install = Join-Path `
             $env:GITHUB_WORKSPACE `
-            $env:INSTALL_DIR
+            'install'
 
-          if (!(Test-Path -LiteralPath $installRoot)) {
-            throw "Install directory does not exist: $installRoot"
-          }
-
-          Write-Host "Install root:"
-          Write-Host $installRoot
-
-          # --------------------------------------------------------
-          # Required files
-          # --------------------------------------------------------
-
-          $requiredFiles = @(
+          $required = @(
             'prismlauncher.exe',
             'prismlauncher_filelink.exe',
             'libcrypto-1_1.dll',
@@ -885,159 +379,29 @@ $archiveUrl
             'jars\NewLaunch.jar'
           )
 
-          Write-Host ""
-          Write-Host "Required files:"
-
-          foreach ($relativePath in $requiredFiles) {
-
-            $path = Join-Path `
-              $installRoot `
-              $relativePath
+          foreach ($file in $required) {
+            $path = Join-Path $install $file
 
             if (!(Test-Path -LiteralPath $path)) {
-              throw "Missing required file: $relativePath"
+              throw "Missing: $file"
             }
 
-            Write-Host "OK: $relativePath"
+            Write-Host "OK: $file"
           }
 
-          # --------------------------------------------------------
-          # PE architecture
-          # --------------------------------------------------------
-
-          Write-Host ""
-          Write-Host "Checking all EXE/DLL PE architectures..."
-
-          $peFiles = Get-ChildItem `
-            -Path $installRoot `
-            -Recurse `
-            -File |
-            Where-Object {
-              $_.Extension -ieq '.exe' -or
-              $_.Extension -ieq '.dll'
-            }
-
-          if ($peFiles.Count -eq 0) {
-            throw "No EXE/DLL files were found in the installation."
-          }
-
-          foreach ($file in $peFiles) {
-
-            $machine = Get-PeMachine $file.FullName
-            $hex = $machine.ToString('X4')
-
-            Write-Host (
-              "{0} -> 0x{1}" -f
-              $file.FullName,
-              $hex
-            )
-
-            if ($machine -ne 0x014C) {
-
-              throw (
-                "x64/non-x86 binary detected: " +
-                "$($file.FullName) " +
-                "(PE machine 0x$hex). " +
-                "Expected x86 0x014C."
-              )
-            }
-          }
-
-          Write-Host ""
-          Write-Host "=============================================="
-          Write-Host "ALL FINAL WINDOWS BINARIES ARE x86 / Win32"
-          Write-Host "=============================================="
-
-
-      # ============================================================
-      # CREATE MANIFEST
-      # ============================================================
-
-      - name: Create manifest
+      - name: Create ZIP
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-
-          $installRoot = Join-Path `
-            $env:GITHUB_WORKSPACE `
-            $env:INSTALL_DIR
-
-          $manifest = Join-Path `
-            $installRoot `
-            'manifest.txt'
-
-          Get-ChildItem `
-            -Path $installRoot `
-            -Recurse `
-            -File |
-            ForEach-Object {
-
-              $_.FullName.Substring(
-                $installRoot.Length + 1
-              )
-
-            } |
-            Sort-Object |
-            Set-Content `
-              -LiteralPath $manifest `
-              -Encoding UTF8
-
-          Write-Host "Manifest created."
-
-
-      # ============================================================
-      # PORTABLE ZIP
-      # ============================================================
-
-      - name: Create portable ZIP
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = 'Stop'
-
-          $installRoot = Join-Path `
-            $env:GITHUB_WORKSPACE `
-            $env:INSTALL_DIR
-
-          $zipName =
-            "PrismLauncher-7.2-Windows-x86-$env:VERSION.zip"
-
-          $zipPath = Join-Path `
-            $env:GITHUB_WORKSPACE `
-            $zipName
-
-          if (Test-Path -LiteralPath $zipPath) {
-            Remove-Item `
-              -LiteralPath $zipPath `
-              -Force
-          }
 
           Compress-Archive `
-            -Path "$installRoot\*" `
-            -DestinationPath $zipPath `
+            -Path 'install\*' `
+            -DestinationPath 'PrismLauncher-Windows-x86.zip' `
             -Force
 
-          if (!(Test-Path -LiteralPath $zipPath)) {
-            throw "Portable ZIP was not created."
-          }
-
-          Write-Host ""
-          Write-Host "Portable package:"
-          Write-Host $zipPath
-
-          $size = (
-            Get-Item -LiteralPath $zipPath
-          ).Length
-
-          Write-Host "ZIP size: $size bytes"
-
-
-      # ============================================================
-      # UPLOAD
-      # ============================================================
-
-      - name: Upload x86 portable build
+      - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: PrismLauncher-7.2-Windows-x86-${{ env.VERSION }}
-          path: PrismLauncher-7.2-Windows-x86-${{ env.VERSION }}.zip
+          name: PrismLauncher-Windows-x86
+          path: PrismLauncher-Windows-x86.zip
           if-no-files-found: error
