@@ -1,141 +1,195 @@
-name: Build PrismLauncher x86
+name: Build x86
 
 on:
-  push:
-    branches:
-      - "7.2"
+  workflow_call:
+    inputs:
+      build_type:
+        description: Type of build (Debug, Release, RelWithDebInfo, MinSizeRel)
+        type: string
+        default: Debug
+      is_qt_cached:
+        description: Enable Qt caching or not
+        type: string
+        default: true
+    secrets:
+      WINDOWS_CODESIGN_CERT:
+        description: Certificate for signing Windows builds
+        required: false
+      WINDOWS_CODESIGN_PASSWORD:
+        description: Password for signing Windows builds
+        required: false
   workflow_dispatch:
-
-permissions:
-  contents: read
+    inputs:
+      build_type:
+        description: Type of build (Debug, Release, RelWithDebInfo, MinSizeRel)
+        type: choice
+        options:
+          - Debug
+          - Release
+          - RelWithDebInfo
+          - MinSizeRel
+        default: Release
+      is_qt_cached:
+        description: Enable Qt caching or not
+        type: boolean
+        default: true
 
 jobs:
   build:
-    name: Windows x86
-    runs-on: windows-2022
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-2022
+            name: "Windows-MSVC-x86"
+            architecture: 'win32'
+            vcvars_arch: 'amd64_x86'
+            qt_ver: 5
+            qt_host: windows
+            qt_arch: 'win32_msvc2019'
+            qt_version: '5.15.2'
+            qt_modules: ''
+            qt_tools: 'tools_openssl_x86'
+
+    runs-on: ${{ matrix.os }}
 
     env:
       INSTALL_DIR: "install"
       INSTALL_PORTABLE_DIR: "install-portable"
       BUILD_DIR: "build"
+      CCACHE_VAR: ""
 
     steps:
       ##
       # PREPARE
       ##
-
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
-          submodules: true
+          submodules: 'true'
 
-      - name: Install Qt 5.15.2 x86
+      - name: Force newer ccache
+        if: inputs.build_type == 'Debug'
+        run: |
+          choco install ccache --version 4.7.1
+
+      - name: Set short version
+        shell: bash
+        run: |
+          ver_short=`git rev-parse --short HEAD`
+          echo "VERSION=$ver_short" >> $GITHUB_ENV
+
+      - name: Install Qt (Windows MSVC x86)
         uses: jurplel/install-qt-action@v4
         with:
-          aqtversion: "==3.3.*"
-          py7zrversion: ">=0.20.2"
-          version: "5.15.2"
-          host: windows
-          target: desktop
-          arch: win32_msvc2019
-          modules: ""
-          cache: true
+          aqtversion: '==3.1.*'
+          py7zrversion: '>=0.20.2'
+          version: ${{ matrix.qt_version }}
+          host: ${{ matrix.qt_host }}
+          target: 'desktop'
+          arch: ${{ matrix.qt_arch }}
+          modules: ${{ matrix.qt_modules }}
+          tools: ${{ matrix.qt_tools }}
+          cache: ${{ inputs.is_qt_cached }}
 
-      - name: Install MSVC
+      - name: Install MSVC (Windows MSVC x86)
         uses: ilammy/msvc-dev-cmd@v1
         with:
           vsversion: 2022
-          arch: amd64_x86
+          arch: ${{ matrix.vcvars_arch }}
 
       ##
       # CONFIGURE
       ##
-
-      - name: Configure CMake
-        shell: powershell
+      - name: Configure CMake (Windows MSVC x86)
         run: |
-          cmake `
-            -S . `
-            -B $env:BUILD_DIR `
-            -DCMAKE_INSTALL_PREFIX=$env:INSTALL_DIR `
-            -DCMAKE_BUILD_TYPE=Release `
-            -DENABLE_LTO=ON `
-            -DLauncher_BUILD_PLATFORM=official `
-            -DLauncher_QT_VERSION_MAJOR=5 `
-            -DCMAKE_MSVC_RUNTIME_LIBRARY="MultiThreadedDLL" `
-            -A Win32 `
-            -DLauncher_FORCE_BUNDLED_LIBS=ON
+          cmake -S . -B ${{ env.BUILD_DIR }} -DCMAKE_INSTALL_PREFIX=${{ env.INSTALL_DIR }} -DCMAKE_BUILD_TYPE=${{ inputs.build_type }} -DENABLE_LTO=ON -DLauncher_BUILD_PLATFORM=official -DLauncher_QT_VERSION_MAJOR=${{ matrix.qt_ver }} -DCMAKE_MSVC_RUNTIME_LIBRARY="MultiThreadedDLL" -A${{ matrix.architecture }} -DLauncher_FORCE_BUNDLED_LIBS=ON
+          # Needed for ccache, but also speeds up compile
+          echo "UseMultiToolTask=true" >> $env:GITHUB_ENV
 
       ##
       # BUILD
       ##
-
-      - name: Build
+      - name: Build (Windows MSVC x86)
         run: |
-          cmake --build $env:BUILD_DIR --config Release
+          cmake --build ${{ env.BUILD_DIR }} --config ${{ inputs.build_type }}
 
       ##
-      # PACKAGE
+      # TEST
       ##
-
-      - name: Install
+      - name: Test (Windows MSVC x86)
         run: |
-          cmake --install $env:BUILD_DIR --config Release
+          ctest -E "^example64|example$" --test-dir build --output-on-failure -C ${{ inputs.build_type }}
 
-      - name: Create portable package
-        shell: powershell
+      ##
+      # PACKAGE BUILDS
+      ##
+      - name: Package (Windows MSVC x86)
         run: |
-          cmake --install $env:BUILD_DIR `
-            --prefix $env:INSTALL_PORTABLE_DIR `
-            --component portable
+          cmake --install ${{ env.BUILD_DIR }} --config ${{ inputs.build_type }}
 
-      - name: Create manifests
-        shell: powershell
+          cd ${{ env.INSTALL_DIR }}
+          Copy-Item D:/a/PrismLauncher-x86/Qt/Tools/OpenSSL/Win_x86/bin/libcrypto-1_1.dll -Destination libcrypto-1_1.dll
+          Copy-Item D:/a/PrismLauncher-x86/Qt/Tools/OpenSSL/Win_x86/bin/libssl-1_1.dll -Destination libssl-1_1.dll
+          cd ${{ github.workspace }}
+
+          Get-ChildItem ${{ env.INSTALL_DIR }} -Recurse | ForEach FullName | Resolve-Path -Relative | % { $_.TrimStart('.\') } | % { $_.TrimStart('${{ env.INSTALL_DIR }}') } | % { $_.TrimStart('\') } | Out-File -FilePath ${{ env.INSTALL_DIR }}/manifest.txt
+
+      - name: Fetch codesign certificate (Windows)
+        shell: bash
         run: |
-          Get-ChildItem $env:INSTALL_DIR -Recurse -File |
-            ForEach-Object FullName |
-            Resolve-Path -Relative |
-            ForEach-Object { $_.TrimStart('.\') } |
-            ForEach-Object { $_.TrimStart($env:INSTALL_DIR) } |
-            ForEach-Object { $_.TrimStart('\') } |
-            Out-File -FilePath "$env:INSTALL_DIR\manifest.txt"
+          echo '${{ secrets.WINDOWS_CODESIGN_CERT }}' | base64 --decode > codesign.pfx
 
-          Get-ChildItem $env:INSTALL_PORTABLE_DIR -Recurse -File |
-            ForEach-Object FullName |
-            Resolve-Path -Relative |
-            ForEach-Object { $_.TrimStart('.\') } |
-            ForEach-Object { $_.TrimStart($env:INSTALL_PORTABLE_DIR) } |
-            ForEach-Object { $_.TrimStart('\') } |
-            Out-File -FilePath "$env:INSTALL_PORTABLE_DIR\manifest.txt"
-
-      ##
-      # INSTALLER
-      ##
-
-      - name: Create installer
-        shell: powershell
+      - name: Sign executable (Windows)
         run: |
-          Set-Location $env:INSTALL_DIR
-          makensis -NOCD "$env:GITHUB_WORKSPACE\$env:BUILD_DIR\program_info\win_install.nsi"
+          if (Get-Content ./codesign.pfx) {
+            cd ${{ env.INSTALL_DIR }}
+            # We ship the exact same executable for portable and non-portable editions, so signing just once is fine
+            SignTool sign /fd sha256 /td sha256 /f ../codesign.pfx /p '${{ secrets.WINDOWS_CODESIGN_PASSWORD }}' /tr http://timestamp.digicert.com prismlauncher.exe prismlauncher_filelink.exe
+          } else {
+            ":warning: Skipped code signing for Windows, as certificate was not present." >> $env:GITHUB_STEP_SUMMARY
+          }
+
+      - name: Package (Windows MSVC x86, portable)
+        run: |
+          cp -r ${{ env.INSTALL_DIR }} ${{ env.INSTALL_PORTABLE_DIR }}  # cmake install on Windows is slow, let's just copy instead
+          cmake --install ${{ env.BUILD_DIR }} --prefix ${{ env.INSTALL_PORTABLE_DIR }} --component portable
+
+          Get-ChildItem ${{ env.INSTALL_PORTABLE_DIR }} -Recurse | ForEach FullName | Resolve-Path -Relative | % { $_.TrimStart('.\') } | % { $_.TrimStart('${{ env.INSTALL_PORTABLE_DIR }}') } | % { $_.TrimStart('\') } | Out-File -FilePath ${{ env.INSTALL_DIR }}/manifest.txt
+
+      - name: Package (Windows, installer)
+        run: |
+          cd ${{ env.INSTALL_DIR }}
+          makensis -NOCD "${{ github.workspace }}/${{ env.BUILD_DIR }}/program_info/win_install.nsi"
+
+      - name: Sign installer (Windows)
+        run: |
+          if (Get-Content ./codesign.pfx) {
+            SignTool sign /fd sha256 /td sha256 /f codesign.pfx /p '${{ secrets.WINDOWS_CODESIGN_PASSWORD }}' /tr http://timestamp.digicert.com PrismLauncher-Setup.exe
+          } else {
+            ":warning: Skipped code signing for Windows, as certificate was not present." >> $env:GITHUB_STEP_SUMMARY
+          }
 
       ##
-      # UPLOAD
+      # UPLOAD BUILDS
       ##
-
-      - name: Upload Windows x86 package
+      - name: Upload binary zip (Windows x86)
         uses: actions/upload-artifact@v4
         with:
-          name: PrismLauncher-x86
-          path: |
-            install/**
-            install-portable/**
+          name: PrismLauncher-${{ matrix.name }}-${{ env.VERSION }}-${{ inputs.build_type }}
+          path: ${{ env.INSTALL_DIR }}/**
           if-no-files-found: error
-          retention-days: 30
 
-      - name: Upload Windows x86 installer
+      - name: Upload binary zip (Windows x86, portable)
         uses: actions/upload-artifact@v4
         with:
-          name: PrismLauncher-x86-installer
-          path: install/PrismLauncher-Setup.exe
+          name: PrismLauncher-${{ matrix.name }}-Portable-${{ env.VERSION }}-${{ inputs.build_type }}
+          path: ${{ env.INSTALL_PORTABLE_DIR }}/**
           if-no-files-found: error
-          retention-days: 30
+
+      - name: Upload installer (Windows x86)
+        uses: actions/upload-artifact@v4
+        with:
+          name: PrismLauncher-${{ matrix.name }}-Setup-${{ env.VERSION }}-${{ inputs.build_type }}
+          path: PrismLauncher-Setup.exe
+          if-no-files-found: error
