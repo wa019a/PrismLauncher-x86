@@ -104,7 +104,7 @@ jobs:
       ##
       - name: Build (Windows MSVC x86)
         run: |
-          cmake --build ${{ env.BUILD_DIR }} --config ${{ inputs.build_type }} -- -clp:Summary -m:1
+          cmake --build ${{ env.BUILD_DIR }} --config ${{ inputs.build_type }} -- /m:1
 
       ##
       # TEST
