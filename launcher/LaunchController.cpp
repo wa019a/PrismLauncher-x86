@@ -101,7 +101,7 @@ void LaunchController::decideAccount()
             return;
         }
 
-        account->login()->start();
+        account->loginOffline()->start();
         accounts->addAccount(account);
         accounts->setDefaultAccount(account);
         m_accountToUse = account;
