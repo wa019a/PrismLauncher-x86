@@ -39,9 +39,12 @@ jobs:
     env:
       BUILD_DIR: build
       INSTALL_DIR: install
-      INSTALL_PORTABLE_DIR: install-portable
 
     steps:
+
+      # ------------------------------------------------------------
+      # Checkout
+      # ------------------------------------------------------------
 
       - name: Checkout
         uses: actions/checkout@v7
@@ -49,49 +52,112 @@ jobs:
           submodules: recursive
           fetch-depth: 0
 
+      # ------------------------------------------------------------
+      # Java
+      #
+      # Prism 7.2's launcher component expects Java tooling.
+      # Keep this explicitly on Java 8 for compatibility.
+      # ------------------------------------------------------------
+
       - name: Setup Java 8
         uses: actions/setup-java@v6
         with:
           distribution: temurin
           java-version: '8'
 
+      # ------------------------------------------------------------
+      # Verify runner prerequisites
+      # ------------------------------------------------------------
+
       - name: Verify build prerequisites
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
 
+          Write-Host "=== CMake ==="
           cmake --version
+
+          Write-Host "=== Java ==="
           java -version
+
+          Write-Host "=== 7-Zip ==="
           7z i | Select-Object -First 3
 
-          $vswhere = Join-Path $env:ProgramFiles(x86) 'Microsoft Visual Studio\Installer\vswhere.exe'
+          Write-Host "=== Visual Studio ==="
 
-          if (!(Test-Path $vswhere)) {
-            throw "vswhere.exe was not found."
+          $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
+
+          if (!(Test-Path -LiteralPath $vswhere)) {
+            throw "vswhere.exe was not found at: $vswhere"
           }
 
-          $vs = & $vswhere `
-            -latest `
-            -products * `
-            -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 `
-            -property installationPath
+          $vs = (
+            & $vswhere `
+              -latest `
+              -products * `
+              -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 `
+              -property installationPath
+          ) | Select-Object -First 1
 
           if ([string]::IsNullOrWhiteSpace($vs)) {
             throw "Visual Studio C++ x86/x64 build tools were not found."
           }
 
-          Write-Host "Visual Studio: $vs"
+          $vs = $vs.Trim()
+
+          Write-Host "Visual Studio installation: $vs"
 
           $vcvars = Join-Path $vs 'VC\Auxiliary\Build\vcvarsall.bat'
+          $vcTools = Join-Path $vs 'VC\Tools\MSVC'
 
-          if (!(Test-Path $vcvars)) {
-            throw "vcvarsall.bat was not found at $vcvars"
+          if (!(Test-Path -LiteralPath $vcvars)) {
+            throw "vcvarsall.bat was not found at: $vcvars"
           }
+
+          if (!(Test-Path -LiteralPath $vcTools)) {
+            throw "MSVC tool directory was not found at: $vcTools"
+          }
+
+          $x86Compiler = Get-ChildItem `
+            -Path $vcTools `
+            -Directory |
+            Where-Object {
+              Test-Path -LiteralPath (
+                Join-Path $_.FullName 'bin\Hostx64\x86\cl.exe'
+              )
+            } |
+            Select-Object -First 1
+
+          if ($null -eq $x86Compiler) {
+            throw "An MSVC x86 compiler (Hostx64\x86\cl.exe) was not found."
+          }
+
+          Write-Host "MSVC x86 compiler:"
+          Write-Host (
+            Join-Path $x86Compiler.FullName 'bin\Hostx64\x86\cl.exe'
+          )
+
+      # ------------------------------------------------------------
+      # Version
+      # ------------------------------------------------------------
 
       - name: Set short version
         shell: bash
         run: |
           echo "VERSION=$(git rev-parse --short HEAD)" >> "$GITHUB_ENV"
+
+      # ------------------------------------------------------------
+      # Qt 5.15.2 x86
+      #
+      # This is the correct Qt architecture for:
+      #   Windows
+      #   MSVC
+      #   32-bit / x86
+      #
+      # We intentionally do NOT ask aqt to install OpenSSL here.
+      # aqt's generic tools_openssl_x86 lookup has already failed
+      # on this exact workflow.
+      # ------------------------------------------------------------
 
       - name: Install Qt 5.15.2 x86
         uses: jurplel/install-qt-action@v4.3.1
@@ -107,6 +173,10 @@ jobs:
           cache: ${{ inputs.is_qt_cached }}
           extra: '--external 7z'
 
+      # ------------------------------------------------------------
+      # Verify Qt installation
+      # ------------------------------------------------------------
+
       - name: Verify Qt x86 installation
         shell: pwsh
         run: |
@@ -118,66 +188,64 @@ jobs:
 
           Write-Host "QT_ROOT_DIR=$env:QT_ROOT_DIR"
 
-          $qtDll = Join-Path `
-            $env:QT_ROOT_DIR `
-            'bin\Qt5Core.dll'
+          $qmake = Join-Path $env:QT_ROOT_DIR 'bin\qmake.exe'
+          $qtCore = Join-Path $env:QT_ROOT_DIR 'bin\Qt5Core.dll'
+          $qtCmake = Join-Path $env:QT_ROOT_DIR 'lib\cmake\Qt5\Qt5Config.cmake'
 
-          $qtCmake = Join-Path `
-            $env:QT_ROOT_DIR `
-            'lib\cmake\Qt5\Qt5Config.cmake'
-
-          if (!(Test-Path $qtDll)) {
-            throw "Qt5Core.dll is missing: $qtDll"
+          foreach ($file in @($qmake, $qtCore, $qtCmake)) {
+            if (!(Test-Path -LiteralPath $file)) {
+              throw "Required Qt file is missing: $file"
+            }
           }
 
-          if (!(Test-Path $qtCmake)) {
-            throw "Qt5Config.cmake is missing: $qtCmake"
+          $qtVersion = (& $qmake -query QT_VERSION).Trim()
+
+          if ($LASTEXITCODE -ne 0) {
+            throw "qmake failed while querying Qt version."
           }
 
-      - name: Locate Qt Tools directory
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = 'Stop'
+          Write-Host "Installed Qt version: $qtVersion"
 
-          if ([string]::IsNullOrWhiteSpace($env:QT_ROOT_DIR)) {
-            throw "QT_ROOT_DIR is not set."
+          if ($qtVersion -ne '5.15.2') {
+            throw "Expected Qt 5.15.2 but found Qt $qtVersion."
           }
 
-          # QT_ROOT_DIR:
-          #   ...\Qt\5.15.2\msvc2019
-          #
-          # We want:
-          #   ...\Qt\Tools
+          Write-Host "Qt installation looks correct."
 
-          $qtVersionDir = Split-Path -Parent $env:QT_ROOT_DIR
-          $qtDir = Split-Path -Parent $qtVersionDir
-          $qtTools = Join-Path $qtDir 'Tools'
-
-          New-Item `
-            -ItemType Directory `
-            -Force `
-            -Path $qtTools | Out-Null
-
-          Write-Host "Qt Tools directory: $qtTools"
-
-          "QT_TOOLS_DIR=$qtTools" >> $env:GITHUB_ENV
+      # ------------------------------------------------------------
+      # Install the exact Qt OpenSSL 1.1 x86 package manually.
+      #
+      # This avoids the aqt metadata lookup which previously failed:
+      #
+      #   Failed to locate XML data for the tool
+      #   'tools_openssl_x86'
+      #
+      # This is the same Qt x86 OpenSSL package used by other
+      # Qt 5.15.2 32-bit Windows build environments.
+      # ------------------------------------------------------------
 
       - name: Install Qt-compatible OpenSSL 1.1 x86
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
 
-          if ([string]::IsNullOrWhiteSpace($env:QT_TOOLS_DIR)) {
-            throw "QT_TOOLS_DIR was not set."
-          }
+          $qtVersionDir = Split-Path -Parent $env:QT_ROOT_DIR
+          $qtRoot = Split-Path -Parent $qtVersionDir
+          $qtTools = Join-Path $qtRoot 'Tools'
 
-          $url = `
-            'https://download.qt.io/online/qtsdkrepository/windows_x86/desktop/tools_openssl_x86/qt.tools.openssl.win_x86/1.1.1-22openssl_1.1.1v_prebuild_x86.7z'
+          New-Item `
+            -ItemType Directory `
+            -Force `
+            -Path $qtTools | Out-Null
 
-          $archive = `
-            Join-Path $env:RUNNER_TEMP 'openssl-x86.7z'
+          $url = 'https://download.qt.io/online/qtsdkrepository/windows_x86/desktop/tools_openssl_x86/qt.tools.openssl.win_x86/1.1.1-22openssl_1.1.1v_prebuild_x86.7z'
 
-          Write-Host "Downloading Qt x86 OpenSSL package..."
+          $archive = Join-Path $env:RUNNER_TEMP 'openssl-x86.7z'
+
+          Write-Host "Qt root:"
+          Write-Host $qtRoot
+
+          Write-Host "Downloading:"
           Write-Host $url
 
           Invoke-WebRequest `
@@ -185,7 +253,7 @@ jobs:
             -Uri $url `
             -OutFile $archive
 
-          if (!(Test-Path $archive)) {
+          if (!(Test-Path -LiteralPath $archive)) {
             throw "OpenSSL archive was not downloaded."
           }
 
@@ -193,105 +261,158 @@ jobs:
 
           & 7z x `
             $archive `
-            "-o$env:QT_TOOLS_DIR" `
+            "-o$qtTools" `
             -y
 
           if ($LASTEXITCODE -ne 0) {
-            throw `
-              "7-Zip failed to extract OpenSSL. Exit code: $LASTEXITCODE"
+            throw "7-Zip failed to extract OpenSSL. Exit code: $LASTEXITCODE"
           }
 
           $crypto = Get-ChildItem `
-            -Path $env:QT_TOOLS_DIR `
+            -Path $qtTools `
             -Recurse `
             -Filter 'libcrypto-1_1.dll' `
             -File |
             Select-Object -First 1
 
           $ssl = Get-ChildItem `
-            -Path $env:QT_TOOLS_DIR `
+            -Path $qtTools `
             -Recurse `
             -Filter 'libssl-1_1.dll' `
             -File |
             Select-Object -First 1
 
           if ($null -eq $crypto) {
-            throw `
-              "OpenSSL package did not contain libcrypto-1_1.dll."
+            throw "OpenSSL package did not contain libcrypto-1_1.dll."
           }
 
           if ($null -eq $ssl) {
-            throw `
-              "OpenSSL package did not contain libssl-1_1.dll."
+            throw "OpenSSL package did not contain libssl-1_1.dll."
           }
 
-          Write-Host "OpenSSL crypto:"
+          Write-Host "OpenSSL crypto DLL:"
           Write-Host $crypto.FullName
 
-          Write-Host "OpenSSL SSL:"
+          Write-Host "OpenSSL SSL DLL:"
           Write-Host $ssl.FullName
 
-          "OPENSSL_X86_CRYPTO=$($crypto.FullName)" `
-            >> $env:GITHUB_ENV
+          "OPENSSL_X86_CRYPTO=$($crypto.FullName)" >> $env:GITHUB_ENV
+          "OPENSSL_X86_SSL=$($ssl.FullName)" >> $env:GITHUB_ENV
 
-          "OPENSSL_X86_SSL=$($ssl.FullName)" `
-            >> $env:GITHUB_ENV
+      # ------------------------------------------------------------
+      # Configure CMake
+      #
+      # Important:
+      # - Visual Studio 17 2022 generator
+      # - Win32 target
+      # - Qt 5
+      # - bundled third-party libraries
+      # - tests disabled
+      # - ASan disabled
+      # - LTO disabled as an explicit CMake option
+      #
+      # The project's own MSVC CMake configuration still uses
+      # /LTCG and /GL for Release builds; we leave that project
+      # behavior intact rather than fighting its CMakeLists.txt.
+      # ------------------------------------------------------------
 
       - name: Configure
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
 
-          Remove-Item `
-            -Recurse `
-            -Force `
-            -ErrorAction SilentlyContinue `
-            $env:BUILD_DIR
+          if (Test-Path -LiteralPath $env:BUILD_DIR) {
+            Remove-Item `
+              -Recurse `
+              -Force `
+              $env:BUILD_DIR
+          }
 
-          cmake `
-            -S . `
-            -B $env:BUILD_DIR `
-            -G "Visual Studio 17 2022" `
-            -A Win32 `
-            -DCMAKE_INSTALL_PREFIX="$env:GITHUB_WORKSPACE\$env:INSTALL_DIR" `
-            -DCMAKE_BUILD_TYPE="${{ inputs.build_type }}" `
-            -DLauncher_BUILD_PLATFORM=official `
-            -DLauncher_QT_VERSION_MAJOR=5 `
-            -DLauncher_FORCE_BUNDLED_LIBS=ON `
-            -DENABLE_LTO=OFF `
-            -DDEBUG_ADDRESS_SANITIZER=OFF `
-            -DBUILD_TESTING=OFF `
-            -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreadedDLL
+          $cmakeArgs = @(
+            '-S', '.',
+            '-B', $env:BUILD_DIR,
+            '-G', 'Visual Studio 17 2022',
+            '-A', 'Win32',
+            "-DCMAKE_INSTALL_PREFIX=$env:GITHUB_WORKSPACE\$env:INSTALL_DIR",
+            "-DCMAKE_BUILD_TYPE=${{ inputs.build_type }}",
+            '-DLauncher_BUILD_PLATFORM=official',
+            '-DLauncher_QT_VERSION_MAJOR=5',
+            '-DLauncher_FORCE_BUNDLED_LIBS=ON',
+            '-DENABLE_LTO=OFF',
+            '-DDEBUG_ADDRESS_SANITIZER=OFF',
+            '-DBUILD_TESTING=OFF',
+            '-DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreadedDLL'
+          )
+
+          Write-Host "Running CMake configure..."
+
+          & cmake @cmakeArgs
+
+          if ($LASTEXITCODE -ne 0) {
+            throw "CMake configuration failed with exit code $LASTEXITCODE."
+          }
+
+      # ------------------------------------------------------------
+      # Build
+      # ------------------------------------------------------------
 
       - name: Build
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
 
-          cmake `
+          Write-Host "Building Prism Launcher..."
+
+          & cmake `
             --build $env:BUILD_DIR `
             --config "${{ inputs.build_type }}" `
             --parallel 2
+
+          if ($LASTEXITCODE -ne 0) {
+            throw "CMake build failed with exit code $LASTEXITCODE."
+          }
+
+      # ------------------------------------------------------------
+      # Install the normal Runtime component.
+      #
+      # The project's CMakeLists already handles Windows Qt
+      # deployment through install_prereqs.cmake.
+      # ------------------------------------------------------------
 
       - name: Install
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
 
-          Remove-Item `
-            -Recurse `
-            -Force `
-            -ErrorAction SilentlyContinue `
-            $env:INSTALL_DIR
+          if (Test-Path -LiteralPath $env:INSTALL_DIR) {
+            Remove-Item `
+              -Recurse `
+              -Force `
+              $env:INSTALL_DIR
+          }
 
-          cmake `
+          Write-Host "Installing Runtime component..."
+
+          & cmake `
             --install $env:BUILD_DIR `
             --config "${{ inputs.build_type }}"
+
+          if ($LASTEXITCODE -ne 0) {
+            throw "CMake install failed with exit code $LASTEXITCODE."
+          }
+
+      # ------------------------------------------------------------
+      # Add OpenSSL runtime DLLs.
+      # ------------------------------------------------------------
 
       - name: Add x86 OpenSSL DLLs
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
+
+          $installRoot = Join-Path `
+            $env:GITHUB_WORKSPACE `
+            $env:INSTALL_DIR
 
           if ([string]::IsNullOrWhiteSpace($env:OPENSSL_X86_CRYPTO)) {
             throw "OpenSSL crypto path was not recorded."
@@ -301,15 +422,34 @@ jobs:
             throw "OpenSSL SSL path was not recorded."
           }
 
+          $cryptoDestination = Join-Path `
+            $installRoot `
+            'libcrypto-1_1.dll'
+
+          $sslDestination = Join-Path `
+            $installRoot `
+            'libssl-1_1.dll'
+
           Copy-Item `
-            $env:OPENSSL_X86_CRYPTO `
-            "$env:GITHUB_WORKSPACE\$env:INSTALL_DIR\libcrypto-1_1.dll" `
+            -LiteralPath $env:OPENSSL_X86_CRYPTO `
+            -Destination $cryptoDestination `
             -Force
 
           Copy-Item `
-            $env:OPENSSL_X86_SSL `
-            "$env:GITHUB_WORKSPACE\$env:INSTALL_DIR\libssl-1_1.dll" `
+            -LiteralPath $env:OPENSSL_X86_SSL `
+            -Destination $sslDestination `
             -Force
+
+          Write-Host "Installed:"
+          Write-Host $cryptoDestination
+          Write-Host $sslDestination
+
+      # ------------------------------------------------------------
+      # Verify that the important outputs actually exist and that
+      # every Windows PE binary in the package is x86.
+      #
+      # IMAGE_FILE_MACHINE_I386 = 0x014C
+      # ------------------------------------------------------------
 
       - name: Verify outputs and PE architecture
         shell: pwsh
@@ -324,24 +464,23 @@ jobs:
               $bytes[0] -ne 0x4D -or
               $bytes[1] -ne 0x5A
             ) {
-              throw "$Path is not a PE file."
+              throw "$Path is not a valid PE file."
             }
 
-            $peOffset = `
-              [BitConverter]::ToInt32($bytes, 0x3C)
+            $peOffset = [BitConverter]::ToInt32($bytes, 0x3C)
 
             if (
               $peOffset -lt 0 -or
               $peOffset + 6 -gt $bytes.Length
             ) {
-              throw "$Path has an invalid PE header."
+              throw "$Path has an invalid PE header offset."
             }
 
             if (
               $bytes[$peOffset] -ne 0x50 -or
               $bytes[$peOffset + 1] -ne 0x45 -or
-              $bytes[$peOffset + 2] -ne 0 -or
-              $bytes[$peOffset + 3] -ne 0
+              $bytes[$peOffset + 2] -ne 0x00 -or
+              $bytes[$peOffset + 3] -ne 0x00
             ) {
               throw "$Path is missing the PE signature."
             }
@@ -352,79 +491,146 @@ jobs:
             )
           }
 
+          $installRoot = Join-Path `
+            $env:GITHUB_WORKSPACE `
+            $env:INSTALL_DIR
+
           $required = @(
-            "$env:GITHUB_WORKSPACE\$env:INSTALL_DIR\prismlauncher.exe",
-            "$env:GITHUB_WORKSPACE\$env:INSTALL_DIR\prismlauncher_filelink.exe",
-            "$env:GITHUB_WORKSPACE\$env:INSTALL_DIR\libcrypto-1_1.dll",
-            "$env:GITHUB_WORKSPACE\$env:INSTALL_DIR\libssl-1_1.dll",
-            "$env:GITHUB_WORKSPACE\$env:INSTALL_DIR\jars\NewLaunch.jar"
+            (Join-Path $installRoot 'prismlauncher.exe'),
+            (Join-Path $installRoot 'prismlauncher_filelink.exe'),
+            (Join-Path $installRoot 'libcrypto-1_1.dll'),
+            (Join-Path $installRoot 'libssl-1_1.dll'),
+            (Join-Path $installRoot 'jars\NewLaunch.jar')
           )
 
+          Write-Host "=== Required output check ==="
+
           foreach ($file in $required) {
-            if (!(Test-Path $file)) {
+            if (!(Test-Path -LiteralPath $file)) {
               throw "Missing required output: $file"
             }
+
+            Write-Host "OK: $file"
           }
 
+          Write-Host ""
+          Write-Host "=== PE architecture check ==="
+
           $peFiles = Get-ChildItem `
-            -Path "$env:GITHUB_WORKSPACE\$env:INSTALL_DIR" `
+            -Path $installRoot `
             -Recurse `
-            -File `
-            -Include *.exe,*.dll
+            -File |
+            Where-Object {
+              $_.Extension -ieq '.exe' -or
+              $_.Extension -ieq '.dll'
+            }
+
+          if ($peFiles.Count -eq 0) {
+            throw "No EXE or DLL files were found in the installation."
+          }
 
           foreach ($file in $peFiles) {
             $machine = Get-PeMachine $file.FullName
 
-            Write-Host `
-              "$($file.FullName) -> PE machine 0x$($machine.ToString('X4'))"
+            Write-Host (
+              "{0} -> PE machine 0x{1}" -f
+              $file.FullName,
+              $machine.ToString('X4')
+            )
 
             if ($machine -ne 0x014C) {
-              throw `
-                "$($file.FullName) is not x86. Expected IMAGE_FILE_MACHINE_I386 (0x014C)."
+              throw (
+                "{0} is not x86. " +
+                "Expected IMAGE_FILE_MACHINE_I386 (0x014C), " +
+                "but found 0x{1}." -f
+                $file.FullName,
+                $machine.ToString('X4')
+              )
             }
           }
 
-      - name: Create portable package
+          Write-Host ""
+          Write-Host "All Windows PE binaries are x86."
+
+      # ------------------------------------------------------------
+      # Generate a file manifest.
+      # ------------------------------------------------------------
+
+      - name: Create manifest
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
 
-          Remove-Item `
+          $installRoot = Join-Path `
+            $env:GITHUB_WORKSPACE `
+            $env:INSTALL_DIR
+
+          $manifest = Join-Path `
+            $installRoot `
+            'manifest.txt'
+
+          Get-ChildItem `
+            -Path $installRoot `
             -Recurse `
-            -Force `
-            -ErrorAction SilentlyContinue `
-            $env:INSTALL_PORTABLE_DIR
+            -File |
+            ForEach-Object {
+              $_.FullName.Substring(
+                $installRoot.Length + 1
+              )
+            } |
+            Sort-Object |
+            Set-Content `
+              -Path $manifest `
+              -Encoding UTF8
 
-          Copy-Item `
-            $env:INSTALL_DIR `
-            $env:INSTALL_PORTABLE_DIR `
-            -Recurse
+          Write-Host "Manifest created:"
+          Write-Host $manifest
 
-          cmake `
-            --install $env:BUILD_DIR `
-            --config "${{ inputs.build_type }}" `
-            --prefix "$env:GITHUB_WORKSPACE\$env:INSTALL_PORTABLE_DIR" `
-            --component portable
+      # ------------------------------------------------------------
+      # Create portable ZIP.
+      #
+      # No separate "portable" CMake component is used here.
+      # The Runtime install tree is already the complete Windows
+      # application bundle.
+      # ------------------------------------------------------------
 
-      - name: Create ZIP
+      - name: Create portable ZIP
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
 
-          $zip = `
+          $zip = Join-Path `
+            $env:GITHUB_WORKSPACE `
             "PrismLauncher-7.2-Windows-x86-$env:VERSION.zip"
 
+          if (Test-Path -LiteralPath $zip) {
+            Remove-Item `
+              -Force `
+              $zip
+          }
+
+          $installRoot = Join-Path `
+            $env:GITHUB_WORKSPACE `
+            $env:INSTALL_DIR
+
           Compress-Archive `
-            -Path "$env:INSTALL_PORTABLE_DIR\*" `
+            -Path "$installRoot\*" `
             -DestinationPath $zip `
             -Force
 
-          if (!(Test-Path $zip)) {
+          if (!(Test-Path -LiteralPath $zip)) {
             throw "Portable ZIP was not created."
           }
 
+          Write-Host "Created:"
+          Write-Host $zip
+
+      # ------------------------------------------------------------
+      # Upload artifact
+      # ------------------------------------------------------------
+
       - name: Upload x86 portable build
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@v7
         with:
           name: PrismLauncher-7.2-Windows-x86-${{ env.VERSION }}
           path: PrismLauncher-7.2-Windows-x86-${{ env.VERSION }}.zip
